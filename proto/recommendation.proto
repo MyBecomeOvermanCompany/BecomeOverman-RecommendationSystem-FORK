@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package recommendation;
+
+option go_package = "BecomeOverMan/internal/generated/recommendation";
+
+// ==================== Сервис рекомендаций ====================
+
+service RecommendationService {
+  // Добавление/обновление пользователей с их quest_ids
+  rpc AddUsers(AddUsersRequest) returns (AddUsersResponse);
+
+  // Семантический поиск квестов
+  rpc SearchQuests(SearchQuestsRequest) returns (SearchQuestsResponse);
+
+  // Рекомендация похожих пользователей (друзей)
+  rpc RecommendUsers(RecommendUsersRequest) returns (RecommendUsersResponse);
+
+  // Рекомендация квестов для пользователя
+  rpc RecommendQuests(RecommendQuestsRequest) returns (RecommendQuestsResponse);
+
+  // Проверка здоровья сервиса
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ==================== AddUsers ====================
+
+message UserWithQuestIDs {
+  int32 user_id = 1;
+  repeated int32 quest_ids = 2;
+}
+
+message AddUsersRequest {
+  repeated UserWithQuestIDs users = 1;
+}
+
+message AddUsersResponse {
+  string status = 1;
+  int32 total_users = 2;
+  int32 total_profiles = 3;
+  string message = 4;
+}
+
+// ==================== SearchQuests ====================
+
+message SearchQuestsRequest {
+  string query = 1;
+  int32 top_k = 2;
+  string category = 3; // опционально
+}
+
+message SearchQuestResult {
+  int32 id = 1;
+  string title = 2;
+  string description = 3;
+  string category = 4;
+  double similarity_score = 5;
+}
+
+message SearchQuestsResponse {
+  repeated SearchQuestResult results = 1;
+  int32 query_embedding_size = 2;
+  double search_time_ms = 3;
+}
+
+// ==================== RecommendUsers ====================
+
+message RecommendUsersRequest {
+  int32 user_id = 1;
+  int32 top_k = 2;
+}
+
+message ExplanationDetails {
+  int32 common_quests_count = 1;
+  repeated int32 common_quests_ids = 2;
+  repeated string common_categories = 3;
+  repeated string user_categories_top = 4;
+  repeated string other_user_categories_top = 5;
+  int32 user_quests_count = 6;
+  int32 other_user_quests_count = 7;
+  string similarity_level = 8;
+}
+
+message UserExplanation {
+  string summary = 1;
+  ExplanationDetails details = 2;
+}
+
+message RecommendedUser {
+  int32 user_id = 1;
+  double similarity_score = 2;
+  UserExplanation explanation = 3;
+}
+
+message RecommendUsersResponse {
+  string status = 1;
+  int32 user_id = 2;
+  repeated RecommendedUser results = 3;
+  int32 total_users_analyzed = 4;
+}
+
+// ==================== RecommendQuests ====================
+
+message RecommendQuestsRequest {
+  repeated int32 user_quest_ids = 1;
+  int32 top_k = 2;
+  string category = 3; // опционально
+}
+
+message RecommendedQuest {
+  int32 id = 1;
+  string title = 2;
+  string description = 3;
+  string category = 4;
+  double similarity_score = 5;
+  string explanation = 6;
+}
+
+message UserProfileInfo {
+  int32 quests_count = 1;
+  int32 embedding_dim = 2;
+  string method = 3;
+}
+
+message RecommendQuestsResponse {
+  repeated RecommendedQuest recommendations = 1;
+  UserProfileInfo user_profile_info = 2;
+}
+
+// ==================== HealthCheck ====================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string model = 2;
+  string device = 3;
+  int32 quests_count = 4;
+}

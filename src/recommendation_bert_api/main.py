@@ -19,6 +19,7 @@ from internal.pydantic_models.pydantic_models import *
 from internal.repo.db import SQLiteBlobStorage
 from src.recommendation_bert_api.routes_utils import _get_recommendation_explanation, \
     _get_user_recommendation_explanation
+from src.recommendation_bert_api.grpc_server import serve_grpc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ async def lifespan(app: FastAPI):
     app.state.model.to(app.state.device)
     logger.info(f"Модель загружена на {app.state.device}")
 
+    # Сохраняем storage в app.state для переиспользования в gRPC
+    app.state.storage = storage
+
     # Кэш эмбеддингов квестов
     app.state.quest_embeddings = {}
     app.state.quests_data = {}
@@ -51,14 +55,32 @@ async def lifespan(app: FastAPI):
     app.state.quests_data, app.state.quest_embeddings = storage.get_all_quests()
     logger.info(f"Загружено квестов: {len(app.state.quests_data)}")
 
+    # Переносим все эмбеддинги квестов на правильное устройство (CUDA/CPU)
+    for q_id, q_emb in app.state.quest_embeddings.items():
+        if isinstance(q_emb, torch.Tensor):
+            app.state.quest_embeddings[q_id] = q_emb.to(app.state.device)
+
     app.state.users_data, app.state.profile_embeddings = storage.get_all_users()
     logger.info(f"Загружено пользователей: {len(app.state.users_data)}")
+
+    # Переносим профили пользователей на правильное устройство
+    for u_id, p_emb in app.state.profile_embeddings.items():
+        if isinstance(p_emb, torch.Tensor):
+            app.state.profile_embeddings[u_id] = p_emb.to(app.state.device)
 
     # Статистика
     stats = storage.get_stats()
     logger.info(f"Статистика БД: {stats}")
 
+    # Запускаем gRPC-сервер в отдельном потоке
+    grpc_server = serve_grpc(app, port=50051)
+    logger.info("gRPC сервер запущен параллельно с FastAPI")
+
     yield
+
+    # Останавливаем gRPC-сервер
+    grpc_server.stop(grace=5)
+    logger.info("gRPC сервер остановлен")
 
     # Закрываем БД при выключении
     logger.info("Выключаем API...")
@@ -418,9 +440,9 @@ async def syncDB():
         PG_CONFIG = {
             'host': 'localhost',
             'port': 5432,
-            'database': 'becomeoverman',
+            'database': 'bo',
             'user': 'postgres',
-            'password': 'postgres'
+            'password': '5',
         }
 
         # Подключаемся к PostgreSQL
@@ -434,30 +456,47 @@ async def syncDB():
         quests = cursor.fetchall()
 
         for quest_id, title, description, category in tqdm(quests, desc="Квесты"):
-            # Создаем текст для эмбеддинга
-            text = f"{title}. {description or ''}"
-            if category:
-                text += f". {category}"
+            try:
+                # Обрабатываем возможные проблемы с кодировкой
+                def safe_str(s):
+                    if s is None:
+                        return ''
+                    if isinstance(s, bytes):
+                        return s.decode('utf-8', errors='replace')
+                    return str(s)
+                
+                title = safe_str(title)
+                description = safe_str(description)
+                category = safe_str(category) if category else None
+                
+                # Создаем текст для эмбеддинга
+                text = f"{title}. {description}"
+                if category:
+                    text += f". {category}"
 
-            # Создаем эмбеддинг
-            embedding = app.state.model.encode(
-                text,
-                convert_to_tensor=True,
-                show_progress_bar=False  # <-- ОТКЛЮЧАЕМ ПРОГРЕСС БАР
-            )
-            # Сохраняем в SQLite
-            quest = Quest(
-                id=quest_id,
-                title=title,
-                description=description,
-                category=category
-            )
+                # Создаем эмбеддинг
+                embedding = app.state.model.encode(
+                    text,
+                    convert_to_tensor=True,
+                    show_progress_bar=False  # <-- ОТКЛЮЧАЕМ ПРОГРЕСС БАР
+                )
+                # Сохраняем в SQLite
+                quest = Quest(
+                    id=quest_id,
+                    title=title,
+                    description=description,
+                    category=category
+                )
 
-            storage.save_quest(quest, embedding)
+                storage.save_quest(quest, embedding)
 
-            # Сохраняем в кеш
-            app.state.quests_data[quest_id] = quest.dict()
-            app.state.quest_embeddings[quest_id] = embedding
+                # Сохраняем в кеш
+                app.state.quests_data[quest_id] = quest.dict()
+                app.state.quest_embeddings[quest_id] = embedding
+                
+            except Exception as e:
+                logger.error(f"Ошибка обработки квеста {quest_id}: {e}")
+                continue
 
         # Шаг 2: сохраняем пользователей и подсчитываем их профили
         logger.info("Мигрируем пользователей...")

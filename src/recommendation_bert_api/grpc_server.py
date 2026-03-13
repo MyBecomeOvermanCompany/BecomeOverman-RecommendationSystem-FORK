@@ -82,6 +82,76 @@ class RecommendationServicer(recommendation_pb2_grpc.RecommendationServiceServic
             context.set_details(str(e))
             return recommendation_pb2.SearchQuestsResponse()
 
+        # ==================== AddUsers ====================
+    def AddUsers(self, request, context):
+        try:
+            from internal.pydantic_models.pydantic_models import User
+
+            storage = self.app.state.storage
+
+            for user_proto in request.users:
+                user_id = user_proto.user_id
+                quest_ids = list(user_proto.quest_ids)
+
+                if user_id in self.app.state.users_data:
+                    existing_user = self.app.state.users_data[user_id]
+                    existing_quest_ids = existing_user.get("quest_ids", [])
+                    if sorted(existing_quest_ids) == sorted(quest_ids):
+                        logger.info(f"Пользователь {user_id} уже существует с такими же quest_ids, пропускаем")
+                        continue
+                    else:
+                        logger.info(f"Пользователь {user_id} существует, но quest_ids изменились. Обновляем.")
+
+                self.app.state.users_data[user_id] = {
+                    "user_id": user_id,
+                    "quest_ids": quest_ids
+                }
+
+                if quest_ids:
+                    user_embeddings = []
+                    valid_quests = []
+
+                    for quest_id in quest_ids:
+                        if quest_id in self.app.state.quest_embeddings:
+                            user_embeddings.append(self.app.state.quest_embeddings[quest_id])
+                            valid_quests.append(quest_id)
+
+                    if len(valid_quests) != len(quest_ids):
+                        self.app.state.users_data[user_id]["quest_ids"] = valid_quests
+                        logger.warning(f"У пользователя {user_id} найдено {len(valid_quests)} из {len(quest_ids)} квестов")
+
+                    if len(user_embeddings) == 0:
+                        logger.warning(f"У пользователя {user_id} нет валидных эмбеддингов квестов")
+                        continue
+
+                    try:
+                        user_embeddings_tensor = torch.stack(user_embeddings)
+                        user_profile_embedding = torch.mean(user_embeddings_tensor, dim=0)
+                        self.app.state.profile_embeddings[user_id] = user_profile_embedding
+
+                        user = User(user_id=user_id, quest_ids=quest_ids)
+                        storage.save_user(user, user_profile_embedding)
+
+                    except Exception as e:
+                        logger.error(f"Ошибка создания профиля для пользователя {user_id}: {e}")
+                        context.set_code(grpc.StatusCode.INTERNAL)
+                        context.set_details(str(e))
+                        return recommendation_pb2.AddUsersResponse()
+
+            return recommendation_pb2.AddUsersResponse(
+                status="success",
+                total_users=len(self.app.state.users_data),
+                total_profiles=len(self.app.state.profile_embeddings),
+                message=f"Обработано {len(request.users)} пользователей"
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка добавления пользователя: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return recommendation_pb2.AddUsersResponse()
+
+
     # ==================== HealthCheck ====================
     def HealthCheck(self, request, context):
         return recommendation_pb2.HealthCheckResponse(
